@@ -1,0 +1,60 @@
+### mode=block p=1
+mode=block processes=1 width=768 height=768
+compute_time=0.491670 s
+image_time=0.000000 s
+output=skipped (missing matplotlib or Pillow)
+### mode=block p=2
+mode=block processes=2 width=768 height=768
+compute_time=0.251415 s
+image_time=0.000000 s
+output=skipped (missing matplotlib or Pillow)
+### mode=block p=4
+mode=block processes=4 width=768 height=768
+compute_time=0.137940 s
+image_time=0.000000 s
+output=skipped (missing matplotlib or Pillow)
+### mode=block p=8
+mode=block processes=8 width=768 height=768
+compute_time=0.103522 s
+image_time=0.000000 s
+output=skipped (missing matplotlib or Pillow)
+### mode=static p=1
+mode=static processes=1 width=768 height=768
+compute_time=0.488796 s
+image_time=0.000000 s
+output=skipped (missing matplotlib or Pillow)
+### mode=static p=2
+mode=static processes=2 width=768 height=768
+compute_time=0.290075 s
+image_time=0.000000 s
+output=skipped (missing matplotlib or Pillow)
+### mode=static p=4
+mode=static processes=4 width=768 height=768
+compute_time=0.128920 s
+image_time=0.000001 s
+output=skipped (missing matplotlib or Pillow)
+### mode=static p=8
+mode=static processes=8 width=768 height=768
+compute_time=0.084935 s
+image_time=0.000000 s
+output=skipped (missing matplotlib or Pillow)
+### mode=master p=1
+mode=master processes=1 width=768 height=768
+compute_time=0.485725 s
+image_time=0.000000 s
+output=skipped (missing matplotlib or Pillow)
+### mode=master p=2
+mode=master processes=2 width=768 height=768
+compute_time=0.501413 s
+image_time=0.000000 s
+output=skipped (missing matplotlib or Pillow)
+### mode=master p=4
+mode=master processes=4 width=768 height=768
+compute_time=0.172789 s
+image_time=0.000000 s
+output=skipped (missing matplotlib or Pillow)
+### mode=master p=8
+mode=master processes=8 width=768 height=768
+compute_time=0.092141 s
+image_time=0.000000 s
+output=skipped (missing matplotlib or Pillow)

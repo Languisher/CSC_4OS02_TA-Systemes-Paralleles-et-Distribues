@@ -1,0 +1,48 @@
+### mode=cols p=1
+mode=cols processes=1 dim=9600 nloc=9600
+avg_time=0.148385 s
+seq_time=0.458725 s
+speedup=3.091460
+check=OK
+### mode=cols p=2
+mode=cols processes=2 dim=9600 nloc=4800
+avg_time=0.183446 s
+seq_time=0.239423 s
+speedup=1.305140
+check=OK
+### mode=cols p=4
+mode=cols processes=4 dim=9600 nloc=2400
+avg_time=0.125195 s
+seq_time=0.220390 s
+speedup=1.760379
+check=OK
+### mode=cols p=8
+mode=cols processes=8 dim=9600 nloc=1200
+avg_time=0.099800 s
+seq_time=0.328202 s
+speedup=3.288591
+check=OK
+### mode=rows p=1
+mode=rows processes=1 dim=9600 nloc=9600
+avg_time=0.132493 s
+seq_time=0.218784 s
+speedup=1.651287
+check=OK
+### mode=rows p=2
+mode=rows processes=2 dim=9600 nloc=4800
+avg_time=0.118853 s
+seq_time=0.234971 s
+speedup=1.976988
+check=OK
+### mode=rows p=4
+mode=rows processes=4 dim=9600 nloc=2400
+avg_time=0.087667 s
+seq_time=0.245341 s
+speedup=2.798543
+check=OK
+### mode=rows p=8
+mode=rows processes=8 dim=9600 nloc=1200
+avg_time=0.061901 s
+seq_time=0.373509 s
+speedup=6.034013
+check=OK

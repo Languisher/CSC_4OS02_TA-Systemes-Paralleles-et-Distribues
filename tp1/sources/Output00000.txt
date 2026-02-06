@@ -1,0 +1,3 @@
+Sequential pi=3.14235 time=0.0766141 s
+MPI point-to-point pi=3.14096 time=0.012955 s
+MPI reduce pi=3.14178 time=0.01316 s
