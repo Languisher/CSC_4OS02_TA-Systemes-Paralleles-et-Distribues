@@ -9,11 +9,18 @@
 class ant
 {
 public:
+    struct step_timing {
+        double select_move_ms{0.0};
+        double terrain_cost_ms{0.0};
+        double mark_pheromone_ms{0.0};
+        std::size_t moves{0};
+    };
+
     /**
      * Une fourmi peut être dans deux états possibles : chargée ( elle porte de la nourriture ) ou non chargée
      */
     enum state { unloaded = 0, loaded = 1 };
-    ant(const position_t& pos, std::size_t seed ) : m_state(unloaded), m_position(pos)
+    ant(const position_t& pos, std::size_t seed ) : m_seed(seed), m_state(unloaded), m_position(pos)
     {} 
     ant(const ant& a) = default;
     ant( ant&& a ) = default;
@@ -27,7 +34,8 @@ public:
     static void set_exploration_coef(double eps) { m_eps = eps; }
 
     void advance( pheronome& phen, const fractal_land& land,
-                  const position_t& pos_food, const position_t& pos_nest, std::size_t& cpteur_food );
+                  const position_t& pos_food, const position_t& pos_nest, std::size_t& cpteur_food,
+                  step_timing* timing = nullptr );
 
 private:
     static double m_eps; // Coefficient d'exploration commun à toutes les fourmis.
