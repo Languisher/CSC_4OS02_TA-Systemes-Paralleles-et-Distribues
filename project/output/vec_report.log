@@ -1,0 +1,8 @@
+In file included from pheronome.hpp:9,
+                 from ant.hpp:6,
+                 from ant.cpp:1:
+basic_types.hpp:3:10: fatal error: SDL2/SDL.h: No such file or directory
+    3 | #include <SDL2/SDL.h>
+      |          ^~~~~~~~~~~~
+compilation terminated.
+make: *** [../output/ant.o] Error 1
