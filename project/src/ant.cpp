@@ -7,8 +7,8 @@ double ant::m_eps = 0.;
 
 using steady_clock_t = std::chrono::steady_clock;
 
-void ant::advance( pheronome& phen, const fractal_land& land, const position_t& pos_food, const position_t& pos_nest,
-                   std::size_t& cpteur_food, step_timing* timing ) 
+void ant::advance( const pheronome& phen, const fractal_land& land, const position_t& pos_food, const position_t& pos_nest,
+                   std::size_t& cpteur_food, step_timing* timing, std::vector<position_t>* marked_cells )
 {
     auto ant_choice = [this]() mutable { return rand_double( 0., 1., this->m_seed ); };
     auto dir_choice = [this]() mutable { return rand_int32( 1, 4, this->m_seed ); };
@@ -59,11 +59,8 @@ void ant::advance( pheronome& phen, const fractal_land& land, const position_t& 
             timing->terrain_cost_ms += std::chrono::duration<double, std::milli>(terrain_t1 - terrain_t0).count();
         }
 
-        auto mark_t0 = steady_clock_t::now();
-        phen.mark_pheronome( new_pos_ant );
-        auto mark_t1 = steady_clock_t::now();
-        if ( timing != nullptr ) {
-            timing->mark_pheromone_ms += std::chrono::duration<double, std::milli>(mark_t1 - mark_t0).count();
+        if ( marked_cells != nullptr ) {
+            marked_cells->push_back( new_pos_ant );
         }
 
         m_position = new_pos_ant;

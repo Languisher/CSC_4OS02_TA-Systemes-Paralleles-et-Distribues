@@ -4,6 +4,7 @@
 #include <array>
 #include <cassert>
 #include <iostream>
+#include <limits>
 #include <utility>
 #include <vector>
 #include "basic_types.hpp"
@@ -62,12 +63,42 @@ public:
       return m_map_of_pheronome[index(pos)];
     }
 
-    void do_evaporation( ) {
-        for ( std::size_t i = 1; i <= m_dim; ++i )
-            for ( std::size_t j = 1; j <= m_dim; ++j ) {
-                m_buffer_pheronome[i * m_stride + j][0] *= m_beta;
-                m_buffer_pheronome[i * m_stride + j][1] *= m_beta;
+    void do_evaporation( bool simd = false ) {
+        for ( std::size_t i = 1; i <= m_dim; ++i ) {
+            if (simd) {
+#pragma omp simd
+                for ( std::size_t j = 1; j <= m_dim; ++j ) {
+                    m_buffer_pheronome[i * m_stride + j][0] *= m_beta;
+                    m_buffer_pheronome[i * m_stride + j][1] *= m_beta;
+                }
+            } else {
+                for ( std::size_t j = 1; j <= m_dim; ++j ) {
+                    m_buffer_pheronome[i * m_stride + j][0] *= m_beta;
+                    m_buffer_pheronome[i * m_stride + j][1] *= m_beta;
+                }
             }
+        }
+    }
+
+    void do_evaporation_rows( std::size_t row_begin, std::size_t row_end, bool simd = false ) {
+        if (row_begin > row_end) return;
+        row_begin = std::max<std::size_t>(1, row_begin);
+        row_end = std::min<std::size_t>(m_dim, row_end);
+        if (row_begin > row_end) return;
+        for ( std::size_t i = row_begin; i <= row_end; ++i ) {
+            if (simd) {
+#pragma omp simd
+                for ( std::size_t j = 1; j <= m_dim; ++j ) {
+                    m_buffer_pheronome[i * m_stride + j][0] *= m_beta;
+                    m_buffer_pheronome[i * m_stride + j][1] *= m_beta;
+                }
+            } else {
+                for ( std::size_t j = 1; j <= m_dim; ++j ) {
+                    m_buffer_pheronome[i * m_stride + j][0] *= m_beta;
+                    m_buffer_pheronome[i * m_stride + j][1] *= m_beta;
+                }
+            }
+        }
     }
 
     void mark_pheronome( const position_t& pos ) {
@@ -98,11 +129,47 @@ public:
             ( 1 - m_alpha ) * 0.25 * ( v2_left + v2_right + v2_upper + v2_bottom );
     }
 
-    void update( ) {
+    void update( bool simd = false ) {
         m_map_of_pheronome.swap( m_buffer_pheronome );
-        cl_update( );
+        cl_update( simd );
         m_map_of_pheronome[( m_pos_food.x + 1 ) * m_stride + m_pos_food.y + 1][0] = 1;
         m_map_of_pheronome[( m_pos_nest.x + 1 ) * m_stride + m_pos_nest.y + 1][1] = 1;
+    }
+
+    std::size_t dimensions() const { return m_dim; }
+    std::size_t stride() const { return m_stride; }
+
+    void export_buffer_flat( std::vector<double>& out ) const {
+        out.resize( m_buffer_pheronome.size() * 2 );
+        for ( std::size_t i = 0; i < m_buffer_pheronome.size(); ++i ) {
+            out[2 * i] = m_buffer_pheronome[i][0];
+            out[2 * i + 1] = m_buffer_pheronome[i][1];
+        }
+    }
+
+    void import_buffer_flat( const std::vector<double>& in ) {
+        const std::size_t expected = m_buffer_pheronome.size() * 2;
+        if (in.size() != expected) return;
+        for ( std::size_t i = 0; i < m_buffer_pheronome.size(); ++i ) {
+            m_buffer_pheronome[i][0] = in[2 * i];
+            m_buffer_pheronome[i][1] = in[2 * i + 1];
+        }
+    }
+
+    void export_evaporated_rows_flat( std::size_t row_begin, std::size_t row_end, std::vector<double>& out ) const {
+        const std::size_t total = m_buffer_pheronome.size();
+        out.assign( total * 2, -std::numeric_limits<double>::infinity() );
+        if (row_begin > row_end) return;
+        row_begin = std::max<std::size_t>(1, row_begin);
+        row_end = std::min<std::size_t>(m_dim, row_end);
+        if (row_begin > row_end) return;
+        for ( std::size_t i = row_begin; i <= row_end; ++i ) {
+            for ( std::size_t j = 1; j <= m_dim; ++j ) {
+                const std::size_t idx = i * m_stride + j;
+                out[2 * idx] = m_buffer_pheronome[idx][0];
+                out[2 * idx + 1] = m_buffer_pheronome[idx][1];
+            }
+        }
     }
 
 private:
@@ -116,13 +183,23 @@ private:
      *     pour l'instant, on se contente simplement de mettre ces cellules avec
      *     des valeurs à -1 pour être sûr que les fourmis évitent ces cellules
      */
-    void cl_update( ) {
+    void cl_update( bool simd = false ) {
         // On mets tous les bords à -1 pour les marquer comme indésirables :
-        for ( unsigned long j = 0; j < m_stride; ++j ) {
-            m_map_of_pheronome[j]                            = {{-1., -1.}};
-            m_map_of_pheronome[j + m_stride * ( m_dim + 1 )] = {{-1., -1.}};
-            m_map_of_pheronome[j * m_stride]                 = {{-1., -1.}};
-            m_map_of_pheronome[j * m_stride + m_dim + 1]     = {{-1., -1.}};
+        if (simd) {
+#pragma omp simd
+            for ( unsigned long j = 0; j < m_stride; ++j ) {
+                m_map_of_pheronome[j]                            = {{-1., -1.}};
+                m_map_of_pheronome[j + m_stride * ( m_dim + 1 )] = {{-1., -1.}};
+                m_map_of_pheronome[j * m_stride]                 = {{-1., -1.}};
+                m_map_of_pheronome[j * m_stride + m_dim + 1]     = {{-1., -1.}};
+            }
+        } else {
+            for ( unsigned long j = 0; j < m_stride; ++j ) {
+                m_map_of_pheronome[j]                            = {{-1., -1.}};
+                m_map_of_pheronome[j + m_stride * ( m_dim + 1 )] = {{-1., -1.}};
+                m_map_of_pheronome[j * m_stride]                 = {{-1., -1.}};
+                m_map_of_pheronome[j * m_stride + m_dim + 1]     = {{-1., -1.}};
+            }
         }
     }
     unsigned long              m_dim, m_stride;
