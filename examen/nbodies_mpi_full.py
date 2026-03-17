@@ -98,33 +98,204 @@ def owner_of_bodies(cell_x_indices, cell_partition_ends):
     return np.searchsorted(cell_partition_ends, cell_x_indices, side="right")
 
 
-def compute_global_cell_stats(positions, masses, grid_min, cell_size, n_cells):
+def compute_global_cell_stats_local(positions, masses, grid_min, cell_size, n_cells):
+    n_total = int(np.prod(n_cells))
     cell_indices = compute_cell_indices_np(positions, grid_min, cell_size, n_cells)
     morse = (
         cell_indices[:, 0]
         + cell_indices[:, 1] * n_cells[0]
         + cell_indices[:, 2] * n_cells[0] * n_cells[1]
     )
-    n_total = int(np.prod(n_cells))
     cell_masses = np.bincount(morse, weights=masses, minlength=n_total).astype(np.float32)
     weighted_x = np.bincount(morse, weights=masses * positions[:, 0], minlength=n_total).astype(np.float32)
     weighted_y = np.bincount(morse, weights=masses * positions[:, 1], minlength=n_total).astype(np.float32)
     weighted_z = np.bincount(morse, weights=masses * positions[:, 2], minlength=n_total).astype(np.float32)
-    cell_com = np.zeros((n_total, 3), dtype=np.float32)
-    valid = cell_masses > 0.0
-    cell_com[valid, 0] = weighted_x[valid] / cell_masses[valid]
-    cell_com[valid, 1] = weighted_y[valid] / cell_masses[valid]
-    cell_com[valid, 2] = weighted_z[valid] / cell_masses[valid]
-    return cell_indices, cell_masses, cell_com
+    weighted_sum = np.column_stack((weighted_x, weighted_y, weighted_z)).astype(np.float32)
+    return cell_indices, cell_masses, weighted_sum
 
 
-def build_extended_structure(all_ids, all_positions, all_masses, all_cell_indices, ghost_start, ghost_end, n_cells):
-    mask = (all_cell_indices[:, 0] >= ghost_start) & (all_cell_indices[:, 0] < ghost_end)
-    ext_ids = all_ids[mask]
-    ext_positions = all_positions[mask]
-    ext_masses = all_masses[mask]
-    ext_indices = all_cell_indices[mask].copy()
+def reduce_global_cell_stats(compute_comm, positions, masses, grid_min, cell_size, n_cells):
+    cell_indices, local_cell_masses, local_weighted_sum = compute_global_cell_stats_local(
+        positions,
+        masses,
+        grid_min,
+        cell_size,
+        n_cells,
+    )
+    global_cell_masses = np.empty_like(local_cell_masses)
+    global_weighted_sum = np.empty_like(local_weighted_sum)
+    compute_comm.Allreduce(local_cell_masses, global_cell_masses, op=MPI.SUM)
+    compute_comm.Allreduce(local_weighted_sum, global_weighted_sum, op=MPI.SUM)
+    global_cell_com = np.zeros_like(global_weighted_sum)
+    valid = global_cell_masses > 0.0
+    global_cell_com[valid] = global_weighted_sum[valid] / global_cell_masses[valid, np.newaxis]
+    return cell_indices, global_cell_masses, global_cell_com
+
+
+def empty_body_dict():
+    return {
+        "ids": np.empty((0,), dtype=np.int64),
+        "positions": np.empty((0, 3), dtype=np.float32),
+        "velocities": np.empty((0, 3), dtype=np.float32),
+        "masses": np.empty((0,), dtype=np.float32),
+        "cell_indices": np.empty((0, 3), dtype=np.int64),
+    }
+
+
+def select_rows(values, mask, *, is_matrix=False, dtype=None):
+    if values is None:
+        return None
+    selected = values[mask]
+    if is_matrix:
+        return np.ascontiguousarray(selected, dtype=dtype if dtype is not None else values.dtype)
+    return np.ascontiguousarray(selected, dtype=dtype if dtype is not None else values.dtype)
+
+
+def pack_body_chunk(ids, positions, masses, cell_indices, velocities=None):
+    chunk = {
+        "ids": ids.tolist(),
+        "positions": positions.tolist(),
+        "masses": masses.tolist(),
+        "cell_indices": cell_indices.tolist(),
+    }
+    if velocities is not None:
+        chunk["velocities"] = velocities.tolist()
+    return chunk
+
+
+def chunk_to_arrays(chunk, include_velocities):
+    if not chunk["ids"]:
+        arrays = empty_body_dict()
+        if not include_velocities:
+            arrays["velocities"] = None
+        return arrays
+    arrays = {
+        "ids": np.ascontiguousarray(np.array(chunk["ids"], dtype=np.int64)),
+        "positions": np.ascontiguousarray(np.array(chunk["positions"], dtype=np.float32)),
+        "masses": np.ascontiguousarray(np.array(chunk["masses"], dtype=np.float32)),
+        "cell_indices": np.ascontiguousarray(np.array(chunk["cell_indices"], dtype=np.int64)),
+    }
+    if include_velocities:
+        arrays["velocities"] = np.ascontiguousarray(np.array(chunk["velocities"], dtype=np.float32))
+    else:
+        arrays["velocities"] = None
+    return arrays
+
+
+def concat_chunks(chunks, include_velocities):
+    valid = [chunk for chunk in chunks if chunk["ids"].size > 0]
+    if not valid:
+        arrays = empty_body_dict()
+        if not include_velocities:
+            arrays["velocities"] = None
+        return arrays
+    arrays = {
+        "ids": np.ascontiguousarray(np.concatenate([chunk["ids"] for chunk in valid]), dtype=np.int64),
+        "positions": np.ascontiguousarray(np.vstack([chunk["positions"] for chunk in valid]), dtype=np.float32),
+        "masses": np.ascontiguousarray(np.concatenate([chunk["masses"] for chunk in valid]), dtype=np.float32),
+        "cell_indices": np.ascontiguousarray(np.vstack([chunk["cell_indices"] for chunk in valid]), dtype=np.int64),
+    }
+    if include_velocities:
+        arrays["velocities"] = np.ascontiguousarray(np.vstack([chunk["velocities"] for chunk in valid]), dtype=np.float32)
+    else:
+        arrays["velocities"] = None
+    return arrays
+
+
+def exchange_ghost_bodies(
+    compute_comm,
+    compute_rank,
+    local_ids,
+    local_positions,
+    local_velocities,
+    local_masses,
+    local_cell_indices,
+    partition_starts,
+    partition_ends,
+    include_velocities,
+):
+    n_compute_ranks = len(partition_starts)
+    send_chunks = [[] for _ in range(n_compute_ranks)]
+    for target_rank in range(n_compute_ranks):
+        if target_rank == compute_rank:
+            continue
+        ghost_start = max(0, int(partition_starts[target_rank]) - 2)
+        ghost_end = int(partition_ends[target_rank]) + 2
+        mask = (local_cell_indices[:, 0] >= ghost_start) & (local_cell_indices[:, 0] < ghost_end)
+        if not np.any(mask):
+            continue
+        send_chunks[target_rank].append(
+            pack_body_chunk(
+                select_rows(local_ids, mask, dtype=np.int64),
+                select_rows(local_positions, mask, is_matrix=True, dtype=np.float32),
+                select_rows(local_masses, mask, dtype=np.float32),
+                select_rows(local_cell_indices, mask, is_matrix=True, dtype=np.int64),
+                select_rows(local_velocities, mask, is_matrix=True, dtype=np.float32) if include_velocities else None,
+            )
+        )
+
+    payload = []
+    for rank_chunks in send_chunks:
+        if not rank_chunks:
+            payload.append({"ids": [], "positions": [], "masses": [], "cell_indices": [], **({"velocities": []} if include_velocities else {})})
+            continue
+        merged = rank_chunks[0]
+        payload.append(merged)
+
+    received = compute_comm.alltoall(payload)
+    received_chunks = [chunk_to_arrays(chunk, include_velocities) for chunk in received]
+    return concat_chunks(received_chunks, include_velocities)
+
+
+def migrate_owned_bodies(
+    compute_comm,
+    local_ids,
+    local_positions,
+    local_velocities,
+    local_masses,
+    grid_min,
+    cell_size,
+    n_cells,
+    partition_ends,
+):
+    local_cell_indices = compute_cell_indices_np(local_positions, grid_min, cell_size, n_cells)
+    owners = owner_of_bodies(local_cell_indices[:, 0], partition_ends)
+    n_compute_ranks = len(partition_ends)
+    payload = []
+    for target_rank in range(n_compute_ranks):
+        mask = owners == target_rank
+        payload.append(
+            pack_body_chunk(
+                select_rows(local_ids, mask, dtype=np.int64),
+                select_rows(local_positions, mask, is_matrix=True, dtype=np.float32),
+                select_rows(local_masses, mask, dtype=np.float32),
+                select_rows(local_cell_indices, mask, is_matrix=True, dtype=np.int64),
+                select_rows(local_velocities, mask, is_matrix=True, dtype=np.float32),
+            )
+        )
+
+    received = compute_comm.alltoall(payload)
+    received_chunks = [chunk_to_arrays(chunk, include_velocities=True) for chunk in received]
+    merged = concat_chunks(received_chunks, include_velocities=True)
+    return (
+        merged["ids"],
+        merged["positions"],
+        merged["velocities"],
+        merged["masses"],
+        merged["cell_indices"],
+    )
+
+
+def build_extended_structure(ids, positions, masses, cell_indices, ghost_start, ghost_end, n_cells):
+    mask = (cell_indices[:, 0] >= ghost_start) & (cell_indices[:, 0] < ghost_end)
+    ext_ids = np.ascontiguousarray(ids[mask], dtype=np.int64)
+    ext_positions = np.ascontiguousarray(positions[mask], dtype=np.float32)
+    ext_masses = np.ascontiguousarray(masses[mask], dtype=np.float32)
+    ext_indices = np.ascontiguousarray(cell_indices[mask], dtype=np.int64)
     ext_nx = ghost_end - ghost_start
+    if ext_ids.size == 0:
+        starts = np.zeros(int(ext_nx * n_cells[1] * n_cells[2]) + 1, dtype=np.int64)
+        return ext_ids, ext_positions, ext_masses, starts, ext_nx
     ext_indices[:, 0] -= ghost_start
     local_morse = (
         ext_indices[:, 0]
@@ -143,27 +314,17 @@ def build_extended_structure(all_ids, all_positions, all_masses, all_cell_indice
     return ext_ids, ext_positions, ext_masses, starts, ext_nx
 
 
-def allgather_1d(comm, local_array, mpi_type):
-    counts = np.array(comm.allgather(local_array.shape[0]), dtype=np.int32)
-    displs = np.zeros_like(counts)
-    if len(counts) > 1:
-        displs[1:] = np.cumsum(counts[:-1])
-    total = int(np.sum(counts))
-    gathered = np.empty(total, dtype=local_array.dtype)
-    comm.Allgatherv(local_array, [gathered, counts, displs, mpi_type])
-    return gathered
-
-
-def allgather_2d(comm, local_array, mpi_type):
-    counts = np.array(comm.allgather(local_array.shape[0]), dtype=np.int32)
-    displs = np.zeros_like(counts)
-    if len(counts) > 1:
-        displs[1:] = np.cumsum(counts[:-1])
-    total = int(np.sum(counts))
-    width = local_array.shape[1]
-    gathered = np.empty((total, width), dtype=local_array.dtype)
-    comm.Allgatherv(local_array, [gathered, counts * width, displs * width, mpi_type])
-    return gathered
+def merge_local_and_ghost(local_ids, local_positions, local_masses, local_cell_indices, ghost_chunk):
+    if ghost_chunk["ids"].size == 0:
+        return local_ids, local_positions, local_masses, local_cell_indices
+    merged_ids = np.ascontiguousarray(np.concatenate((local_ids, ghost_chunk["ids"])), dtype=np.int64)
+    merged_positions = np.ascontiguousarray(np.vstack((local_positions, ghost_chunk["positions"])), dtype=np.float32)
+    merged_masses = np.ascontiguousarray(np.concatenate((local_masses, ghost_chunk["masses"])), dtype=np.float32)
+    merged_cell_indices = np.ascontiguousarray(
+        np.vstack((local_cell_indices, ghost_chunk["cell_indices"])),
+        dtype=np.int64,
+    )
+    return merged_ids, merged_positions, merged_masses, merged_cell_indices
 
 
 @njit(parallel=True)
@@ -221,6 +382,19 @@ def compute_acceleration_targets(
     return accelerations
 
 
+def gather_positions_for_display(world_comm, compute_comm, world_rank, local_ids, local_positions, n_bodies):
+    if world_rank == 0:
+        frame_positions = np.empty((n_bodies, 3), dtype=np.float32)
+    else:
+        gathered = compute_comm.gather((local_ids, local_positions), root=0)
+        if compute_comm.Get_rank() == 0:
+            frame_positions = np.empty((n_bodies, 3), dtype=np.float32)
+            for ids_chunk, positions_chunk in gathered:
+                frame_positions[ids_chunk] = positions_chunk
+            world_comm.Send([frame_positions, MPI.FLOAT], dest=0, tag=30)
+        return None
+
+
 def run_full_parallel_measurement(args):
     comm = MPI.COMM_WORLD
     world_rank = comm.Get_rank()
@@ -249,7 +423,6 @@ def run_full_parallel_measurement(args):
     initial_state = comm.bcast(initial_state, root=0)
 
     ids = initial_state["ids"]
-    all_masses_by_id = initial_state["masses"]
     colors = initial_state["colors"]
     intensities = initial_state["intensities"]
     grid_min = initial_state["box"][0].astype(np.float32)
@@ -267,14 +440,18 @@ def run_full_parallel_measurement(args):
         frame_samples = []
 
         for _ in range(args.warmup_steps):
-            comm.Recv([frame_positions, MPI.FLOAT], source=1, tag=10)
-            _ = comm.recv(source=1, tag=11)
+            frame_start = time.perf_counter()
+            comm.Recv([frame_positions, MPI.FLOAT], source=1, tag=30)
+            compute_ms = comm.recv(source=1, tag=31)
             simulate_display_step(frame_positions, colors, intensities)
+            _ = compute_ms
+            frame_end = time.perf_counter()
+            _ = frame_end - frame_start
 
         for _ in range(args.steps):
             frame_start = time.perf_counter()
-            comm.Recv([frame_positions, MPI.FLOAT], source=1, tag=20)
-            compute_ms = comm.recv(source=1, tag=21)
+            comm.Recv([frame_positions, MPI.FLOAT], source=1, tag=30)
+            compute_ms = comm.recv(source=1, tag=31)
             simulate_display_step(frame_positions, colors, intensities)
             frame_end = time.perf_counter()
             compute_samples.append(compute_ms)
@@ -297,36 +474,46 @@ def run_full_parallel_measurement(args):
     local_ids = np.ascontiguousarray(ids[owned_mask], dtype=np.int64)
     local_positions = np.ascontiguousarray(initial_state["positions"][owned_mask], dtype=np.float32)
     local_velocities = np.ascontiguousarray(initial_state["velocities"][owned_mask], dtype=np.float32)
-    local_masses = np.ascontiguousarray(all_masses_by_id[local_ids], dtype=np.float32)
+    local_masses = np.ascontiguousarray(initial_state["masses"][owned_mask], dtype=np.float32)
 
     for step_idx in range(args.warmup_steps + args.steps):
         step_start = time.perf_counter()
 
-        all_ids = allgather_1d(compute_comm, local_ids, MPI.LONG)
-        all_positions = allgather_2d(compute_comm, local_positions, MPI.FLOAT)
-        all_velocities = allgather_2d(compute_comm, local_velocities, MPI.FLOAT)
-        all_cell_indices, global_cell_masses, global_cell_com = compute_global_cell_stats(
-            all_positions,
-            all_masses_by_id[all_ids],
+        local_cell_indices, global_cell_masses, global_cell_com = reduce_global_cell_stats(
+            compute_comm,
+            local_positions,
+            local_masses,
             grid_min,
             cell_size,
             n_cells,
         )
 
-        owners = owner_of_bodies(all_cell_indices[:, 0], partition_ends)
-        current_owned_mask = owners == compute_rank
-        local_ids = np.ascontiguousarray(all_ids[current_owned_mask], dtype=np.int64)
-        local_positions = np.ascontiguousarray(all_positions[current_owned_mask], dtype=np.float32)
-        local_velocities = np.ascontiguousarray(all_velocities[current_owned_mask], dtype=np.float32)
-        local_masses = np.ascontiguousarray(all_masses_by_id[local_ids], dtype=np.float32)
-
+        ghost_chunk = exchange_ghost_bodies(
+            compute_comm,
+            compute_rank,
+            local_ids,
+            local_positions,
+            local_velocities,
+            local_masses,
+            local_cell_indices,
+            partition_starts,
+            partition_ends,
+            include_velocities=False,
+        )
+        ext_ids, ext_positions, ext_masses, ext_cell_indices = merge_local_and_ghost(
+            local_ids,
+            local_positions,
+            local_masses,
+            local_cell_indices,
+            ghost_chunk,
+        )
         ghost_start = max(0, int(partition_starts[compute_rank]) - 2)
         ghost_end = min(int(n_cells[0]), int(partition_ends[compute_rank]) + 2)
         ext_ids, ext_positions, ext_masses, ext_cell_starts, ext_nx = build_extended_structure(
-            all_ids,
-            all_positions,
-            all_masses_by_id[all_ids],
-            all_cell_indices,
+            ext_ids,
+            ext_positions,
+            ext_masses,
+            ext_cell_indices,
             ghost_start,
             ghost_end,
             n_cells,
@@ -353,20 +540,39 @@ def run_full_parallel_measurement(args):
             dtype=np.float32,
         )
 
-        pred_all_ids = allgather_1d(compute_comm, local_ids, MPI.LONG)
-        pred_all_positions = allgather_2d(compute_comm, predicted_positions, MPI.FLOAT)
-        pred_cell_indices, pred_global_cell_masses, pred_global_cell_com = compute_global_cell_stats(
-            pred_all_positions,
-            all_masses_by_id[pred_all_ids],
+        predicted_cell_indices, pred_global_cell_masses, pred_global_cell_com = reduce_global_cell_stats(
+            compute_comm,
+            predicted_positions,
+            local_masses,
             grid_min,
             cell_size,
             n_cells,
         )
+
+        pred_ghost_chunk = exchange_ghost_bodies(
+            compute_comm,
+            compute_rank,
+            local_ids,
+            predicted_positions,
+            None,
+            local_masses,
+            predicted_cell_indices,
+            partition_starts,
+            partition_ends,
+            include_velocities=False,
+        )
+        pred_ext_ids, pred_ext_positions, pred_ext_masses, pred_ext_cell_indices = merge_local_and_ghost(
+            local_ids,
+            predicted_positions,
+            local_masses,
+            predicted_cell_indices,
+            pred_ghost_chunk,
+        )
         pred_ext_ids, pred_ext_positions, pred_ext_masses, pred_ext_cell_starts, pred_ext_nx = build_extended_structure(
-            pred_all_ids,
-            pred_all_positions,
-            all_masses_by_id[pred_all_ids],
-            pred_cell_indices,
+            pred_ext_ids,
+            pred_ext_positions,
+            pred_ext_masses,
+            pred_ext_cell_indices,
             ghost_start,
             ghost_end,
             n_cells,
@@ -394,18 +600,28 @@ def run_full_parallel_measurement(args):
             dtype=np.float32,
         )
 
+        local_ids, local_positions, local_velocities, local_masses, _ = migrate_owned_bodies(
+            compute_comm,
+            local_ids,
+            local_positions,
+            local_velocities,
+            local_masses,
+            grid_min,
+            cell_size,
+            n_cells,
+            partition_ends,
+        )
+
         local_compute_ms = (time.perf_counter() - step_start) * 1000.0
         step_compute_ms = compute_comm.allreduce(local_compute_ms, op=MPI.MAX)
 
+        gathered = compute_comm.gather((local_ids, local_positions), root=0)
         if compute_rank == 0:
             positions_by_id = np.empty((n_bodies, 3), dtype=np.float32)
-            positions_by_id[pred_all_ids] = pred_all_positions
-            if step_idx < args.warmup_steps:
-                comm.Send([positions_by_id, MPI.FLOAT], dest=0, tag=10)
-                comm.send(step_compute_ms, dest=0, tag=11)
-            else:
-                comm.Send([positions_by_id, MPI.FLOAT], dest=0, tag=20)
-                comm.send(step_compute_ms, dest=0, tag=21)
+            for ids_chunk, positions_chunk in gathered:
+                positions_by_id[ids_chunk] = positions_chunk
+            comm.Send([positions_by_id, MPI.FLOAT], dest=0, tag=30)
+            comm.send(step_compute_ms, dest=0, tag=31)
 
     return None
 

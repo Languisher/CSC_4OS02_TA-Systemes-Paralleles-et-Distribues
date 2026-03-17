@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 from numba import get_num_threads, set_num_threads
 
-from nbodies_grid_baseline_aligned import NBodySystem as BaselineNBodySystem
 from nbodies_grid_numba_parallel import NBodySystem as ParallelNBodySystem
 
 
@@ -33,18 +32,6 @@ def parse_args():
     )
     parser.add_argument("--warmup-steps", type=int, default=3, help="Warmup steps before timing.")
     parser.add_argument("--steps", type=int, default=10, help="Timed steps per thread count.")
-    parser.add_argument(
-        "--baseline-compute-ms",
-        type=float,
-        default=None,
-        help="Override baseline compute time in ms. If omitted, measure the aligned Python baseline.",
-    )
-    parser.add_argument(
-        "--baseline-frame-ms",
-        type=float,
-        default=None,
-        help="Override baseline frame time in ms. If omitted, measure the aligned Python baseline.",
-    )
     parser.add_argument(
         "--csv",
         default="outputs/numba_parallel_benchmark.csv",
@@ -104,21 +91,6 @@ def main():
     csv_path = Path(args.csv)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if args.baseline_compute_ms is None or args.baseline_frame_ms is None:
-        measured_baseline = benchmark_system(BaselineNBodySystem, args)
-        baseline_compute = measured_baseline["compute_ms"] if args.baseline_compute_ms is None else args.baseline_compute_ms
-        baseline_frame = measured_baseline["frame_ms"] if args.baseline_frame_ms is None else args.baseline_frame_ms
-    else:
-        measured_baseline = None
-        baseline_compute = args.baseline_compute_ms
-        baseline_frame = args.baseline_frame_ms
-
-    if measured_baseline is not None:
-        print(
-            f"baseline(aligned python) | compute={baseline_compute:.3f} ms | "
-            f"frame={baseline_frame:.3f} ms"
-        )
-
     results = []
     for thread_count in args.threads:
         result = benchmark_thread_count(args, thread_count)
@@ -128,11 +100,11 @@ def main():
             f"compute={result['compute_ms']:.3f} ms | frame={result['frame_ms']:.3f} ms"
         )
 
+    baseline_compute = results[0]["compute_ms"]
+    baseline_frame = results[0]["frame_ms"]
     for result in results:
         result["compute_speedup"] = baseline_compute / result["compute_ms"]
         result["frame_speedup"] = baseline_frame / result["frame_ms"]
-        result["baseline_compute_ms"] = baseline_compute
-        result["baseline_frame_ms"] = baseline_frame
 
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
@@ -142,8 +114,6 @@ def main():
                 "threads_used",
                 "compute_ms",
                 "frame_ms",
-                "baseline_compute_ms",
-                "baseline_frame_ms",
                 "compute_speedup",
                 "frame_speedup",
             ],

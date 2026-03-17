@@ -25,7 +25,6 @@ make initial-times
 # which is equivalent to ...
 
 uv run python measure_initial_times.py \
-  --implementation baseline \
   --mode headless \
   --data data/galaxy_1000 \
   --dt 0.001 \
@@ -41,7 +40,7 @@ uv run python plot_initial_times.py \
 
 Le résultat: ![](outputs/initial_times.png)
 
-C'est la partie du calcul des trajectoires qui est la plus intéressante à paralléliser.
+Dans cette mesure `headless`, la préparation des données d'affichage est négligeable devant le calcul des trajectoires. Le calcul reste donc la partie la plus intéressante à paralléliser.
 
 ## Parallélisation en numba du code séquentiel
 
@@ -67,7 +66,7 @@ On obtient :
 
 ![](outputs/numba_parallel_benchmark.png)
 
-L’accélération est calculée par la formule `S(p) = T1 / Tp`, où `T1` est le temps à 1 thread et `Tp` le temps à `p` threads. On observe donc une très bonne montée en charge jusqu’à `8` threads, avec un gain proche de `x4`, même si l’accélération n’est pas parfaitement linéaire à cause des surcoûts de parallélisation et de la part séquentielle restante.
+L’accélération est calculée par la formule `S(p) = T1 / Tp`, où `T1` est le temps de la version numba à 1 thread et `Tp` le temps à `p` threads. Avec les résultats obtenus dans ce dépôt, on passe d’environ `9.865 ms` à 1 thread à `2.448 ms` à 8 threads, soit une accélération d’environ `x4.03`. La montée en charge est donc bonne, sans être parfaitement linéaire à cause des surcoûts de parallélisation et de la part séquentielle restante.
 
 ## Séparation de l'affichage et du calcul
 
@@ -83,7 +82,7 @@ mpirun -n 2 /bin/zsh -lc 'uv run python benchmark_mpi_split.py --data data/galax
 
 On obtient : ![](outputs/mpi_split_benchmark.png)
 
-On constate que l'accélération augmente quand le nombre de threads de calcul augmente, mais elle reste du même ordre que dans la version précédente. Cela s'explique par le fait que le coût dominant reste le calcul numérique lui-même. La séparation MPI entre affichage et calcul n'accélère pas fortement l'algorithme ; elle ajoute même un léger surcoût de communication et de synchronisation. Ainsi, le gain principal provient toujours du parallélisme numba, tandis que la partie affichage n'est pas suffisamment coûteuse pour modifier fortement les performances globales.
+On constate que l'accélération augmente quand le nombre de threads de calcul augmente, mais elle reste du même ordre que dans la version précédente. Cela s'explique par le fait que le coût dominant reste le calcul numérique lui-même. La séparation MPI entre affichage et calcul n'accélère pas fortement l'algorithme ; elle ajoute même un léger surcoût de communication et de synchronisation. Le gain principal provient donc toujours du parallélisme numba.
 
 ## Parallélisation du calcul
 
@@ -107,7 +106,7 @@ uv run python benchmark_mpi_full.py \
   --grid 20 20 1 \
   --warmup-steps 3 \
   --steps 10 \
-  --processes 2 3 5 \
+  --processes 2 3 4 5 6 7 8 \
   --threads 1 2 4 8 \
   --csv outputs/mpi_full_benchmark.csv
 
@@ -123,22 +122,15 @@ On constate donc que :
 - passer de 2 à 3 processus MPI améliore nettement le temps de calcul ;
 - en revanche, au-delà de 3 processus MPI, les performances ne progressent plus de façon régulière et se dégradent souvent, ce qui montre que le surcoût de communication, de synchronisation et le déséquilibre de charge finissent par dominer.
 
-Le meilleur cas mesuré ici est obtenu avec 3 processus MPI et 8 threads numba, avec un temps de calcul moyen de 2.606 ms.
+Après correction de l’implémentation MPI complète, le meilleur cas mesuré dans le fichier `outputs/mpi_full_benchmark.csv` est obtenu avec `3` processus MPI au total (`2` rangs de calcul) et `8` threads numba, avec un temps de calcul moyen de `3.611 ms`.
 
 
 On en déduit que l’accélération n’est pas monotone avec le nombre de processus MPI : au-delà d’un certain point, les surcoûts liés à la distribution du travail, aux communications et à la synchronisation deviennent trop importants.
 
-Le problème : Un déséquilibre de charge.
-Dans l’implémentation actuelle, la grille est découpée uniformément suivant Ox, c’est-à-dire que chaque processus reçoit à peu près le même nombre de cellules. Or, dans une galaxie, les étoiles sont beaucoup plus concentrées près du centre que dans les zones extérieures. Par conséquent, certaines tranches de grille contiennent beaucoup plus de corps et donc beaucoup plus d’interactions à calculer que d’autres.
+Le problème principal est un déséquilibre de charge. Dans l’implémentation actuelle, la grille est découpée uniformément suivant `Ox`, c’est-à-dire que chaque processus reçoit à peu près le même nombre de cellules. Or, dans une galaxie, les étoiles sont beaucoup plus concentrées près du centre que dans les zones extérieures. Par conséquent, certaines tranches de grille contiennent beaucoup plus de corps et donc beaucoup plus d’interactions à calculer que d’autres.
 
 Une distribution plus intelligente consisterait à ne plus répartir les cellules uniformément, mais à les distribuer en fonction de leur charge estimée. Par exemple, on peut attribuer moins de cellules centrales à chaque processus, car elles contiennent beaucoup d’étoiles, et davantage de cellules périphériques, car elles sont peu peuplées. L’objectif est que chaque processus reçoive une quantité de travail similaire plutôt qu’un même nombre de cellules.
 
 Cette stratégie permettrait d’améliorer l’équilibrage de charge et donc potentiellement les performances globales.
 
-Cependant, un nouveau problème peut apparaître : l’augmentation du coût des communications.
-
-En effet, si la distribution devient irrégulière :
-les frontières entre sous-domaines deviennent plus complexes ;
-la gestion des cellules fantômes devient plus coûteuse ;
-les échanges de particules entre processus peuvent devenir plus fréquents ; les synchronisations MPI peuvent prendre plus de temps.
-Autrement dit, on réduit le déséquilibre de charge, mais on risque de faire apparaître un autre goulot d’étranglement : le coût de communication et de synchronisation entre processus.
+Cependant, un nouveau problème peut apparaître : l’augmentation du coût des communications. Si la distribution devient irrégulière, les frontières entre sous-domaines deviennent plus complexes, la gestion des cellules fantômes devient plus coûteuse, et les échanges de particules entre processus peuvent devenir plus fréquents. Autrement dit, on réduit le déséquilibre de charge, mais on risque de faire apparaître un autre goulot d’étranglement : le coût de communication et de synchronisation entre processus.

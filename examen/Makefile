@@ -45,7 +45,7 @@ initial-times: install
 	$(PYTHON) plot_initial_times.py --csv $(CSV) --output $(PLOT)
 
 numba-parallel: install
-	$(PYTHON) benchmark_numba_parallel.py --data $(DATA) --dt $(DT) --grid $(NI) $(NJ) $(NK) --warmup-steps $(WARMUP) --steps $(STEPS) --threads $(THREADS) $(BASELINE_ARGS) --csv $(NUMBA_CSV)
+	$(PYTHON) benchmark_numba_parallel.py --data $(DATA) --dt $(DT) --grid $(NI) $(NJ) $(NK) --warmup-steps $(WARMUP) --steps $(STEPS) --threads $(THREADS) --csv $(NUMBA_CSV)
 	$(PYTHON) plot_numba_parallel.py --csv $(NUMBA_CSV) --output $(NUMBA_PLOT)
 
 mpi-split: install

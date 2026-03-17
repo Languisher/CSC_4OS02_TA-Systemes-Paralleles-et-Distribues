@@ -38,14 +38,19 @@ def parse_args():
     parser.add_argument(
         "--baseline-compute-ms",
         type=float,
-        default=54.41,
+        default=None,
         help="Reference initial compute time in ms used for speedup annotations.",
     )
     parser.add_argument(
         "--baseline-frame-ms",
         type=float,
-        default=54.41,
+        default=None,
         help="Reference initial frame time in ms used for speedup annotations.",
+    )
+    parser.add_argument(
+        "--baseline-csv",
+        default="outputs/initial_times.csv",
+        help="Initial timing CSV used when explicit baseline values are not provided.",
     )
     parser.add_argument("--mpiexec", default="mpirun", help="MPI launcher executable.")
     parser.add_argument("--uv", default="uv", help="uv executable.")
@@ -58,6 +63,16 @@ def parse_args():
         help="CSV output path.",
     )
     return parser.parse_args()
+
+
+def load_default_baseline(csv_path):
+    with Path(csv_path).open("r", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    if not rows:
+        raise RuntimeError(f"No timing rows found in {csv_path}")
+    compute_ms = sum(float(row["update_ms"]) for row in rows) / len(rows)
+    frame_ms = sum(float(row["total_ms"]) for row in rows) / len(rows)
+    return compute_ms, frame_ms
 
 
 def run_one_case(args, process_count, thread_count):
@@ -87,6 +102,17 @@ def main():
     args = parse_args()
     csv_path = Path(args.csv)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.baseline_compute_ms is None or args.baseline_frame_ms is None:
+        default_compute_ms, default_frame_ms = load_default_baseline(args.baseline_csv)
+    else:
+        default_compute_ms = None
+        default_frame_ms = None
+
+    if args.baseline_compute_ms is None:
+        args.baseline_compute_ms = default_compute_ms
+    if args.baseline_frame_ms is None:
+        args.baseline_frame_ms = default_frame_ms
 
     rows = []
     for process_count in args.processes:
