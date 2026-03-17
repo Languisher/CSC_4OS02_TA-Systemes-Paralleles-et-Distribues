@@ -122,7 +122,7 @@ On constate donc que :
 - passer de 2 à 3 processus MPI améliore nettement le temps de calcul ;
 - en revanche, au-delà de 3 processus MPI, les performances ne progressent plus de façon régulière et se dégradent souvent, ce qui montre que le surcoût de communication, de synchronisation et le déséquilibre de charge finissent par dominer.
 
-Après correction de l’implémentation MPI complète, le meilleur cas mesuré dans le fichier `outputs/mpi_full_benchmark.csv` est obtenu avec `3` processus MPI au total (`2` rangs de calcul) et `8` threads numba, avec un temps de calcul moyen de `3.611 ms`.
+Le meilleur cas mesuré dans le fichier `outputs/mpi_full_benchmark.csv` est obtenu avec `3` processus MPI au total (`2` rangs de calcul) et `8` threads numba, avec un temps de calcul moyen de `3.611 ms`.
 
 
 On en déduit que l’accélération n’est pas monotone avec le nombre de processus MPI : au-delà d’un certain point, les surcoûts liés à la distribution du travail, aux communications et à la synchronisation deviennent trop importants.
